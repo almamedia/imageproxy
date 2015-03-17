@@ -125,6 +125,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyHeader(w, resp, "Content-Length")
 	copyHeader(w, resp, "Content-Type")
+	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public, must-revalidate, proxy-revalidate", 31557600))
 	io.Copy(w, resp.Body)
 }
 
