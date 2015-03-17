@@ -94,6 +94,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req.Options != emptyOptions {
 		u += "#" + req.Options.String()
 	}
+
 	resp, err := p.Client.Get(u)
 	if err != nil {
 		msg := fmt.Sprintf("error fetching remote image: %v", err)
@@ -101,6 +102,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusInternalServerError)
 		return
 	}
+	defer resp.Body.Close()
+
+	cached := resp.Header.Get(httpcache.XFromCache)
+	glog.Infof("request: %v (served from cache: %v)", *req, cached == "1")
 
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("remote URL %q returned status: %v", req.URL, resp.Status)
@@ -109,18 +114,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Add("Last-Modified", resp.Header.Get("Last-Modified"))
-	w.Header().Add("Expires", resp.Header.Get("Expires"))
-	w.Header().Add("Etag", resp.Header.Get("Etag"))
+	copyHeader(w, resp, "Last-Modified")
+	copyHeader(w, resp, "Expires")
+	copyHeader(w, resp, "Etag")
 
 	if is304 := check304(r, resp); is304 {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	w.Header().Add("Content-Length", resp.Header.Get("Content-Length"))
-	defer resp.Body.Close()
+	copyHeader(w, resp, "Content-Length")
+	copyHeader(w, resp, "Content-Type")
 	io.Copy(w, resp.Body)
+}
+
+func copyHeader(w http.ResponseWriter, r *http.Response, header string) {
+	key := http.CanonicalHeaderKey(header)
+	if value, ok := r.Header[key]; ok {
+		w.Header()[key] = value
+	}
 }
 
 // allowed returns whether the specified URL is on the whitelist of remote hosts.
