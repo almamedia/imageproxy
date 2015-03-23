@@ -25,7 +25,7 @@ import (
 )
 
 // default compression quality of resized jpegs
-const defaultQuality = 95
+const defaultQuality = 75
 
 // resample filter used when resizing images
 var resampleFilter = imaging.Lanczos
