@@ -1,3 +1,17 @@
+// Copyright 2013 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package imageproxy
 
 import (
@@ -15,38 +29,118 @@ import (
 )
 
 func TestAllowed(t *testing.T) {
-	whitelist := []string{"a.test", "*.b.test", "*c.test"}
+	whitelist := []string{"good"}
+	key := []byte("c0ffee")
+
+	genRequest := func(headers map[string]string) *http.Request {
+		req := &http.Request{Header: make(http.Header)}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		return req
+	}
 
 	tests := []struct {
 		url       string
+		options   Options
 		whitelist []string
+		referrers []string
+		key       []byte
+		request   *http.Request
 		allowed   bool
 	}{
-		{"http://foo/image", nil, true},
-		{"http://foo/image", []string{}, true},
+		// no whitelist or signature key
+		{"http://test/image", emptyOptions, nil, nil, nil, nil, true},
 
-		{"http://a.test/image", whitelist, true},
-		{"http://x.a.test/image", whitelist, false},
+		// whitelist
+		{"http://good/image", emptyOptions, whitelist, nil, nil, nil, true},
+		{"http://bad/image", emptyOptions, whitelist, nil, nil, nil, false},
 
-		{"http://b.test/image", whitelist, true},
-		{"http://x.b.test/image", whitelist, true},
-		{"http://x.y.b.test/image", whitelist, true},
+		// referrer
+		{"http://test/image", emptyOptions, nil, whitelist, nil, genRequest(map[string]string{"Referer": "http://good/foo"}), true},
+		{"http://test/image", emptyOptions, nil, whitelist, nil, genRequest(map[string]string{"Referer": "http://bad/foo"}), false},
+		{"http://test/image", emptyOptions, nil, whitelist, nil, genRequest(map[string]string{"Referer": "MALFORMED!!"}), false},
+		{"http://test/image", emptyOptions, nil, whitelist, nil, genRequest(map[string]string{}), false},
 
-		{"http://c.test/image", whitelist, false},
-		{"http://xc.test/image", whitelist, false},
-		{"/image", whitelist, false},
+		// signature key
+		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, nil, nil, key, nil, true},
+		{"http://test/image", Options{Signature: "deadbeef"}, nil, nil, key, nil, false},
+		{"http://test/image", emptyOptions, nil, nil, key, nil, false},
+
+		// whitelist and signature
+		{"http://good/image", emptyOptions, whitelist, nil, key, nil, true},
+		{"http://bad/image", Options{Signature: "gWivrPhXBbsYEwpmWAKjbJEiAEgZwbXbltg95O2tgNI="}, nil, nil, key, nil, true},
+		{"http://bad/image", emptyOptions, whitelist, nil, key, nil, false},
 	}
 
 	for _, tt := range tests {
 		p := NewProxy(nil, nil)
 		p.Whitelist = tt.whitelist
+		p.SignatureKey = tt.key
+		p.Referrers = tt.referrers
 
 		u, err := url.Parse(tt.url)
 		if err != nil {
 			t.Errorf("error parsing url %q: %v", tt.url, err)
 		}
-		if got, want := p.allowed(u), tt.allowed; got != want {
-			t.Errorf("allowed(%q) returned %v, want %v", u, got, want)
+		req := &Request{u, tt.options, tt.request}
+		if got, want := p.allowed(req), tt.allowed; (got == nil) != want {
+			t.Errorf("allowed(%q) returned %v, want %v.\nTest struct: %#v", req, got, want, tt)
+		}
+	}
+}
+
+func TestValidHost(t *testing.T) {
+	whitelist := []string{"a.test", "*.b.test", "*c.test"}
+
+	tests := []struct {
+		url   string
+		valid bool
+	}{
+		{"http://a.test/image", true},
+		{"http://x.a.test/image", false},
+
+		{"http://b.test/image", true},
+		{"http://x.b.test/image", true},
+		{"http://x.y.b.test/image", true},
+
+		{"http://c.test/image", false},
+		{"http://xc.test/image", false},
+		{"/image", false},
+	}
+
+	for _, tt := range tests {
+		u, err := url.Parse(tt.url)
+		if err != nil {
+			t.Errorf("error parsing url %q: %v", tt.url, err)
+		}
+		if got, want := validHost(whitelist, u), tt.valid; got != want {
+			t.Errorf("validHost(%v, %q) returned %v, want %v", whitelist, u, got, want)
+		}
+	}
+}
+
+func TestValidSignature(t *testing.T) {
+	key := []byte("c0ffee")
+
+	tests := []struct {
+		url     string
+		options Options
+		valid   bool
+	}{
+		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ="}, true},
+		{"http://test/image", Options{Signature: "NDx5zZHx7QfE8E-ijowRreq6CJJBZjwiRfOVk_mkfQQ"}, true},
+		{"http://test/image", emptyOptions, false},
+	}
+
+	for _, tt := range tests {
+		u, err := url.Parse(tt.url)
+		if err != nil {
+			t.Errorf("error parsing url %q: %v", tt.url, err)
+		}
+		req := &Request{u, tt.options, &http.Request{}}
+		if got, want := validSignature(key, req), tt.valid; got != want {
+			t.Errorf("validSignature(%v, %q) returned %v, want %v", key, u, got, want)
 		}
 	}
 }
@@ -145,7 +239,7 @@ func (t testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		img := new(bytes.Buffer)
 		png.Encode(img, m)
 
-		raw = fmt.Sprintf("HTTP/1.1 200 OK\nContent-Length: %d\n\n%v", len(img.Bytes()), img.Bytes())
+		raw = fmt.Sprintf("HTTP/1.1 200 OK\nContent-Length: %d\n\n%s", len(img.Bytes()), img.Bytes())
 	default:
 		raw = "HTTP/1.1 404 Not Found\n\n"
 	}
@@ -168,7 +262,7 @@ func TestProxy_ServeHTTP(t *testing.T) {
 	}{
 		{"/favicon.ico", http.StatusOK},
 		{"//foo", http.StatusBadRequest},                            // invalid request URL
-		{"/http://bad.test/", http.StatusBadRequest},                // Disallowed host
+		{"/http://bad.test/", http.StatusForbidden},                 // Disallowed host
 		{"/http://good.test/error", http.StatusInternalServerError}, // HTTP protocol error
 		{"/http://good.test/nocontent", http.StatusNoContent},       // non-OK response
 
@@ -209,7 +303,10 @@ func TestProxy_ServeHTTP_is304(t *testing.T) {
 
 func TestTransformingTransport(t *testing.T) {
 	client := new(http.Client)
-	tr := &TransformingTransport{testTransport{}, client}
+	tr := &TransformingTransport{
+		Transport:     testTransport{},
+		CachingClient: client,
+	}
 	client.Transport = tr
 
 	tests := []struct {

@@ -19,6 +19,8 @@ import (
 	"testing"
 )
 
+var emptyOptions = Options{}
+
 func TestOptions_String(t *testing.T) {
 	tests := []struct {
 		Options Options
@@ -26,15 +28,15 @@ func TestOptions_String(t *testing.T) {
 	}{
 		{
 			emptyOptions,
-			"0x0,q0",
+			"0x0",
 		},
 		{
-			Options{1, 2, true, 90, true, true, 80},
+			Options{1, 2, true, 90, true, true, 80, "", false},
 			"1x2,fit,r90,fv,fh,q80",
 		},
 		{
-			Options{0.15, 1.3, false, 45, false, false, 95},
-			"0.15x1.3,r45,q95",
+			Options{0.15, 1.3, false, 45, false, false, 95, "c0ffee", false},
+			"0.15x1.3,r45,q95,sc0ffee",
 		},
 	}
 
@@ -82,8 +84,8 @@ func TestParseOptions(t *testing.T) {
 		{"FOO,1,BAR,r90,BAZ", Options{Width: 1, Height: 1, Rotate: 90}},
 
 		// all flags, in different orders
-		{"q70,1x2,fit,r90,fv,fh", Options{1, 2, true, 90, true, true, 70}},
-		{"r90,fh,q90,1x2,fv,fit", Options{1, 2, true, 90, true, true, 90}},
+		{"q70,1x2,fit,r90,fv,fh,sc0ffee", Options{1, 2, true, 90, true, true, 70, "c0ffee", false}},
+		{"r90,fh,sc0ffee,q90,1x2,fv,fit", Options{1, 2, true, 90, true, true, 90, "c0ffee", false}},
 	}
 
 	for _, tt := range tests {
@@ -141,6 +143,14 @@ func TestNewRequest(t *testing.T) {
 			"http://localhost//http://example.com/foo?bar",
 			"http://example.com/foo?bar", emptyOptions, false,
 		},
+		{
+			"http://localhost/http:/example.com/foo",
+			"http://example.com/foo", emptyOptions, false,
+		},
+		{
+			"http://localhost/http:///example.com/foo",
+			"http://example.com/foo", emptyOptions, false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -150,7 +160,7 @@ func TestNewRequest(t *testing.T) {
 			continue
 		}
 
-		r, err := NewRequest(req)
+		r, err := NewRequest(req, nil)
 		if tt.ExpectError {
 			if err == nil {
 				t.Errorf("NewRequest(%v) did not return expected error", req)

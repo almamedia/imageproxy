@@ -1,3 +1,17 @@
+// Copyright 2013 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package imageproxy
 
 import (
@@ -35,6 +49,29 @@ func newImage(w, h int, pixels ...color.NRGBA) image.Image {
 		}
 	}
 	return m
+}
+
+func TestResizeParams(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 64, 128))
+	tests := []struct {
+		opt    Options
+		w, h   int
+		resize bool
+	}{
+		{Options{Width: 0.5}, 32, 0, true},
+		{Options{Height: 0.5}, 0, 64, true},
+		{Options{Width: 0.5, Height: 0.5}, 32, 64, true},
+		{Options{Width: 100, Height: 200}, 0, 0, false},
+		{Options{Width: 100, Height: 200, ScaleUp: true}, 100, 200, true},
+		{Options{Width: 64}, 0, 0, false},
+		{Options{Height: 128}, 0, 0, false},
+	}
+	for _, tt := range tests {
+		w, h, resize := resizeParams(src, tt.opt)
+		if w != tt.w || h != tt.h || resize != tt.resize {
+			t.Errorf("resizeParams(%v) returned (%d,%d,%t), want (%d,%d,%t)", tt.opt, w, h, resize, tt.w, tt.h, tt.resize)
+		}
+	}
 }
 
 func TestTransform(t *testing.T) {
@@ -126,6 +163,11 @@ func TestTransformImage(t *testing.T) {
 			ref,
 			Options{Width: 100, Height: 100},
 			ref,
+		},
+		{ // can resize larger than original image
+			ref,
+			Options{Width: 4, Height: 4, ScaleUp: true},
+			newImage(4, 4, red, red, green, green, red, red, green, green, blue, blue, yellow, yellow, blue, blue, yellow, yellow),
 		},
 		{ // invalid values
 			ref,

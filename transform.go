@@ -17,11 +17,12 @@ package imageproxy
 import (
 	"bytes"
 	"image"
-	"image/gif"
+	_ "image/gif" // register gif format
 	"image/jpeg"
 	"image/png"
 
 	"github.com/disintegration/imaging"
+	"willnorris.com/go/gifresize"
 )
 
 // default compression quality of resized jpegs
@@ -34,7 +35,7 @@ var resampleFilter = imaging.Lanczos
 // encoded image in one of the supported formats (gif, jpeg, or png).  The
 // bytes of a similarly encoded image is returned.
 func Transform(img []byte, opt Options) ([]byte, error) {
-	if opt == emptyOptions {
+	if !opt.transform() {
 		// bail if no transformation was requested
 		return img, nil
 	}
@@ -45,34 +46,45 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		return nil, err
 	}
 
-	m = transformImage(m, opt)
-
-	// encode image
+	// transform and encode image
 	buf := new(bytes.Buffer)
 	switch format {
 	case "gif":
-		gif.Encode(buf, m, nil)
+		fn := func(img image.Image) image.Image {
+			return transformImage(img, opt)
+		}
+		err = gifresize.Process(buf, bytes.NewReader(img), fn)
+		if err != nil {
+			return nil, err
+		}
 	case "jpeg":
 		quality := opt.Quality
 		if quality == 0 {
 			quality = defaultQuality
 		}
 
-		jpeg.Encode(buf, m, &jpeg.Options{Quality: quality})
+		m = transformImage(m, opt)
+		err = jpeg.Encode(buf, m, &jpeg.Options{Quality: quality})
+		if err != nil {
+			return nil, err
+		}
 	case "png":
-		png.Encode(buf, m)
+		m = transformImage(m, opt)
+		err = png.Encode(buf, m)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return buf.Bytes(), nil
 }
 
-// transformImage modifies the image m based on the transformations specified
-// in opt.
-func transformImage(m image.Image, opt Options) image.Image {
+// resizeParams determines if the image needs to be resized, and if so, the
+// dimensions to resize to.
+func resizeParams(m image.Image, opt Options) (w, h int, resize bool) {
 	// convert percentage width and height values to absolute values
 	imgW := m.Bounds().Max.X - m.Bounds().Min.X
 	imgH := m.Bounds().Max.Y - m.Bounds().Min.Y
-	var w, h int
 	if 0 < opt.Width && opt.Width < 1 {
 		w = int(float64(imgW) * opt.Width)
 	} else if opt.Width < 0 {
@@ -88,16 +100,29 @@ func transformImage(m image.Image, opt Options) image.Image {
 		h = int(opt.Height)
 	}
 
-	// never resize larger than the original image
-	if w > imgW {
-		w = imgW
-	}
-	if h > imgH {
-		h = imgH
+	// never resize larger than the original image unless specifically allowed
+	if !opt.ScaleUp {
+		if w > imgW {
+			w = imgW
+		}
+		if h > imgH {
+			h = imgH
+		}
 	}
 
-	// resize
-	if w != 0 || h != 0 {
+	// if requested width and height match the original, skip resizing
+	if (w == imgW || w == 0) && (h == imgH || h == 0) {
+		return 0, 0, false
+	}
+
+	return w, h, true
+}
+
+// transformImage modifies the image m based on the transformations specified
+// in opt.
+func transformImage(m image.Image, opt Options) image.Image {
+	// resize if needed
+	if w, h, resize := resizeParams(m, opt); resize {
 		if opt.Fit {
 			m = imaging.Fit(m, w, h, resampleFilter)
 		} else {

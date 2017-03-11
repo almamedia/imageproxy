@@ -19,6 +19,9 @@ package imageproxy // import "github.com/almamedia/imageproxy"
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,15 +30,12 @@ import (
 	"strings"
 	"time"
 
+	tphttp "github.com/almamedia/imageproxy/third_party/http"
 	"github.com/golang/glog"
 	"github.com/gregjones/httpcache"
 )
 
 // Proxy serves image requests.
-//
-// Note that a Proxy should not be run behind a http.ServeMux, since the
-// ServeMux aggressively cleans URLs and removes the double slash in the
-// embedded request URL.
 type Proxy struct {
 	Client *http.Client // client used to fetch remote URLs
 	Cache  Cache        // cache used to cache responses
@@ -43,6 +43,27 @@ type Proxy struct {
 	// Whitelist specifies a list of remote hosts that images can be
 	// proxied from.  An empty list means all hosts are allowed.
 	Whitelist []string
+
+	// Referrers, when given, requires that requests to the image
+	// proxy come from a referring host. An empty list means all
+	// hosts are allowed.
+	Referrers []string
+
+	// DefaultBaseURL is the URL that relative remote URLs are resolved in
+	// reference to.  If nil, all remote URLs specified in requests must be
+	// absolute.
+	DefaultBaseURL *url.URL
+
+	// SignatureKey is the HMAC key used to verify signed requests.
+	SignatureKey []byte
+
+	// Allow images to scale beyond their original dimensions.
+	ScaleUp bool
+
+	// Timeout specifies a time limit for requests served by this Proxy.
+	// If a call runs for longer than its time limit, a 504 Gateway Timeout
+	// response is returned.  A Timeout of zero means no timeout.
+	Timeout time.Duration
 }
 
 // NewProxy constructs a new proxy.  The provided http RoundTripper will be
@@ -56,6 +77,10 @@ func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
 		cache = NopCache
 	}
 
+	proxy := Proxy{
+		Cache: cache,
+	}
+
 	client := new(http.Client)
 	client.Transport = &httpcache.Transport{
 		Transport:           &TransformingTransport{transport, client},
@@ -63,19 +88,32 @@ func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
 		MarkCachedResponses: true,
 	}
 
-	return &Proxy{
-		Client: client,
-		Cache:  cache,
-	}
+	proxy.Client = client
+
+	return &proxy
 }
 
-// ServeHTTP handles image requests.
+// ServeHTTP handles incoming requests.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/favicon.ico" {
 		return // ignore favicon requests
 	}
 
-	req, err := NewRequest(r)
+	if r.URL.Path == "/health-check" {
+		fmt.Fprint(w, "OK")
+		return
+	}
+
+	var h http.Handler = http.HandlerFunc(p.serveImage)
+	if p.Timeout > 0 {
+		h = tphttp.TimeoutHandler(h, p.Timeout, "Gateway timeout waiting for remote resource.")
+	}
+	h.ServeHTTP(w, r)
+}
+
+// serveImage handles incoming requests for proxied images.
+func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
+	req, err := NewRequest(r, p.DefaultBaseURL)
 	if err != nil {
 		msg := fmt.Sprintf("invalid request URL: %v", err)
 		glog.Error(msg)
@@ -83,19 +121,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !p.allowed(req.URL) {
-		msg := fmt.Sprintf("remote URL is not for an allowed host: %v", req.URL)
-		glog.Error(msg)
-		http.Error(w, msg, http.StatusBadRequest)
+	// assign static settings from proxy to req.Options
+	req.Options.ScaleUp = p.ScaleUp
+
+	if err := p.allowed(req); err != nil {
+		glog.Error(err)
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
-	u := req.URL.String()
-	if req.Options != emptyOptions {
-		u += "#" + req.Options.String()
-	}
-
-	resp, err := p.Client.Get(u)
+	resp, err := p.Client.Get(req.String())
 	if err != nil {
 		msg := fmt.Sprintf("error fetching remote image: %v", err)
 		glog.Error(msg)
@@ -107,16 +142,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cached := resp.Header.Get(httpcache.XFromCache)
 	glog.Infof("request: %v (served from cache: %v)", *req, cached == "1")
 
-	if resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("remote URL %q returned status: %v", req.URL, resp.Status)
-		glog.Error(msg)
-		http.Error(w, msg, resp.StatusCode)
-		return
-	}
-
+	copyHeader(w, resp, "Cache-Control")
 	copyHeader(w, resp, "Last-Modified")
 	copyHeader(w, resp, "Expires")
 	copyHeader(w, resp, "Etag")
+	copyHeader(w, resp, "Link")
 
 	if is304 := check304(r, resp); is304 {
 		w.WriteHeader(http.StatusNotModified)
@@ -126,6 +156,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeader(w, resp, "Content-Length")
 	copyHeader(w, resp, "Content-Type")
 	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d, public, must-revalidate, proxy-revalidate", 31557600))
+	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
@@ -136,13 +167,32 @@ func copyHeader(w http.ResponseWriter, r *http.Response, header string) {
 	}
 }
 
-// allowed returns whether the specified URL is on the whitelist of remote hosts.
-func (p *Proxy) allowed(u *url.URL) bool {
-	if len(p.Whitelist) == 0 {
-		return true
+// allowed determines whether the specified request contains an allowed
+// referrer, host, and signature.  It returns an error if the request is not
+// allowed.
+func (p *Proxy) allowed(r *Request) error {
+	if len(p.Referrers) > 0 && !validReferrer(p.Referrers, r.Original) {
+		return fmt.Errorf("request does not contain an allowed referrer: %v", r)
 	}
 
-	for _, host := range p.Whitelist {
+	if len(p.Whitelist) == 0 && len(p.SignatureKey) == 0 {
+		return nil // no whitelist or signature key, all requests accepted
+	}
+
+	if len(p.Whitelist) > 0 && validHost(p.Whitelist, r.URL) {
+		return nil
+	}
+
+	if len(p.SignatureKey) > 0 && validSignature(p.SignatureKey, r) {
+		return nil
+	}
+
+	return fmt.Errorf("request does not contain an allowed host or valid signature: %v", r)
+}
+
+// validHost returns whether the host in u matches one of hosts.
+func validHost(hosts []string, u *url.URL) bool {
+	for _, host := range hosts {
 		if u.Host == host {
 			return true
 		}
@@ -152,6 +202,36 @@ func (p *Proxy) allowed(u *url.URL) bool {
 	}
 
 	return false
+}
+
+// returns whether the referrer from the request is in the host list.
+func validReferrer(hosts []string, r *http.Request) bool {
+	u, err := url.Parse(r.Header.Get("Referer"))
+	if err != nil { // malformed or blank header, just deny
+		return false
+	}
+
+	return validHost(hosts, u)
+}
+
+// validSignature returns whether the request signature is valid.
+func validSignature(key []byte, r *Request) bool {
+	sig := r.Options.Signature
+	if m := len(sig) % 4; m != 0 { // add padding if missing
+		sig += strings.Repeat("=", 4-m)
+	}
+
+	got, err := base64.URLEncoding.DecodeString(sig)
+	if err != nil {
+		glog.Errorf("error base64 decoding signature %q", r.Options.Signature)
+		return false
+	}
+
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(r.URL.String()))
+	want := mac.Sum(nil)
+
+	return hmac.Equal(got, want)
 }
 
 // check304 checks whether we should send a 304 Not Modified in response to
@@ -217,8 +297,10 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 
 	opt := ParseOptions(req.URL.Fragment)
+
 	img, err := Transform(b, opt)
 	if err != nil {
+		glog.Errorf("error transforming image: %v", err)
 		img = b
 	}
 

@@ -19,17 +19,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 const (
-	optFit            = "fit"
-	optFlipVertical   = "fv"
-	optFlipHorizontal = "fh"
-	optRotatePrefix   = "r"
-	optQualityPrefix  = "q"
-	optSizeDelimiter  = "x"
+	optFit             = "fit"
+	optFlipVertical    = "fv"
+	optFlipHorizontal  = "fh"
+	optRotatePrefix    = "r"
+	optQualityPrefix   = "q"
+	optSignaturePrefix = "s"
+	optSizeDelimiter   = "x"
+	optScaleUp         = "scaleUp"
 )
 
 // URLError reports a malformed URL error.
@@ -61,9 +64,14 @@ type Options struct {
 
 	// Quality of output image
 	Quality int
-}
 
-var emptyOptions = Options{}
+	// HMAC Signature for signed requests.
+	Signature string
+
+	// Allow image to scale beyond its original dimensions.  This value
+	// will always be overwritten by the value of Proxy.ScaleUp.
+	ScaleUp bool
+}
 
 func (o Options) String() string {
 	buf := new(bytes.Buffer)
@@ -80,8 +88,23 @@ func (o Options) String() string {
 	if o.FlipHorizontal {
 		fmt.Fprintf(buf, ",%s", optFlipHorizontal)
 	}
-	fmt.Fprintf(buf, ",%s%d", string(optQualityPrefix), o.Quality)
+	if o.Quality != 0 {
+		fmt.Fprintf(buf, ",%s%d", string(optQualityPrefix), o.Quality)
+	}
+	if o.Signature != "" {
+		fmt.Fprintf(buf, ",%s%s", string(optSignaturePrefix), o.Signature)
+	}
+	if o.ScaleUp {
+		fmt.Fprintf(buf, ",%s", optScaleUp)
+	}
 	return buf.String()
+}
+
+// transform returns whether o includes transformation options.  Some fields
+// are not transform related at all (like Signature), and others only apply in
+// the presence of other fields (like Fit and Quality).
+func (o Options) transform() bool {
+	return o.Width != 0 || o.Height != 0 || o.Rotate != 0 || o.FlipHorizontal || o.FlipVertical
 }
 
 // ParseOptions parses str as a list of comma separated transformation options.
@@ -142,7 +165,7 @@ func (o Options) String() string {
 // 	100,fv,fh - 100 pixels square, flipped horizontal and vertical
 // 	200x,q80  - 200 pixels wide, proportional height, 80% quality
 func ParseOptions(str string) Options {
-	options := Options{}
+	var options Options
 
 	for _, opt := range strings.Split(str, ",") {
 		switch {
@@ -154,12 +177,16 @@ func ParseOptions(str string) Options {
 			options.FlipVertical = true
 		case opt == optFlipHorizontal:
 			options.FlipHorizontal = true
+		case opt == optScaleUp: // this option is intentionally not documented above
+			options.ScaleUp = true
 		case strings.HasPrefix(opt, optRotatePrefix):
 			value := strings.TrimPrefix(opt, optRotatePrefix)
 			options.Rotate, _ = strconv.Atoi(value)
 		case strings.HasPrefix(opt, optQualityPrefix):
 			value := strings.TrimPrefix(opt, optQualityPrefix)
 			options.Quality, _ = strconv.Atoi(value)
+		case strings.HasPrefix(opt, optSignaturePrefix):
+			options.Signature = strings.TrimPrefix(opt, optSignaturePrefix)
 		case strings.Contains(opt, optSizeDelimiter):
 			size := strings.SplitN(opt, optSizeDelimiter, 2)
 			if w := size[0]; w != "" {
@@ -182,8 +209,17 @@ func ParseOptions(str string) Options {
 // Request is an imageproxy request which includes a remote URL of an image to
 // proxy, and an optional set of transformations to perform.
 type Request struct {
-	URL     *url.URL // URL of the image to proxy
-	Options Options  // Image transformation to perform
+	URL      *url.URL      // URL of the image to proxy
+	Options  Options       // Image transformation to perform
+	Original *http.Request // The original HTTP request
+}
+
+// String returns the request URL as a string, with r.Options encoded in the
+// URL fragment.
+func (r Request) String() string {
+	u := *r.URL
+	u.Fragment = r.Options.String()
+	return u.String()
 }
 
 // NewRequest parses an http.Request into an imageproxy Request.  Options and
@@ -199,12 +235,12 @@ type Request struct {
 // 	http://localhost/100x200,r90/http://example.com/image.jpg?foo=bar
 // 	http://localhost//http://example.com/image.jpg
 // 	http://localhost/http://example.com/image.jpg
-func NewRequest(r *http.Request) (*Request, error) {
+func NewRequest(r *http.Request, baseURL *url.URL) (*Request, error) {
 	var err error
-	req := new(Request)
+	req := &Request{Original: r}
 
 	path := r.URL.Path[1:] // strip leading slash
-	req.URL, err = url.Parse(path)
+	req.URL, err = parseURL(path)
 	if err != nil || !req.URL.IsAbs() {
 		// first segment should be options
 		parts := strings.SplitN(path, "/", 2)
@@ -212,12 +248,17 @@ func NewRequest(r *http.Request) (*Request, error) {
 			return nil, URLError{"too few path segments", r.URL}
 		}
 
-		req.URL, err = url.Parse(parts[1])
+		var err error
+		req.URL, err = parseURL(parts[1])
 		if err != nil {
 			return nil, URLError{fmt.Sprintf("unable to parse remote URL: %v", err), r.URL}
 		}
 
 		req.Options = ParseOptions(parts[0])
+	}
+
+	if baseURL != nil {
+		req.URL = baseURL.ResolveReference(req.URL)
 	}
 
 	if !req.URL.IsAbs() {
@@ -231,4 +272,13 @@ func NewRequest(r *http.Request) (*Request, error) {
 	// query string is always part of the remote URL
 	req.URL.RawQuery = r.URL.RawQuery
 	return req, nil
+}
+
+var reCleanedURL = regexp.MustCompile(`^(https?):/+([^/])`)
+
+// parseURL parses s as a URL, handling URLs that have been munged by
+// path.Clean or a webserver that collapses multiple slashes.
+func parseURL(s string) (*url.URL, error) {
+	s = reCleanedURL.ReplaceAllString(s, "$1://$2")
+	return url.Parse(s)
 }
