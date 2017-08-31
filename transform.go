@@ -16,12 +16,15 @@ package imageproxy
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	_ "image/gif" // register gif format
 	"image/jpeg"
 	"image/png"
+	"math"
 
 	"github.com/disintegration/imaging"
+	_ "golang.org/x/image/webp" // register webp format
 	"willnorris.com/go/gifresize"
 )
 
@@ -46,6 +49,10 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		return nil, err
 	}
 
+	if opt.Format != "" {
+		format = opt.Format
+	}
+
 	// transform and encode image
 	buf := new(bytes.Buffer)
 	switch format {
@@ -57,7 +64,7 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-	case "jpeg":
+	case "jpeg", "webp": // default to encoding webp as jpeg
 		quality := opt.Quality
 		if quality == 0 {
 			quality = defaultQuality
@@ -74,9 +81,24 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+	default:
+		return nil, fmt.Errorf("unsupported format: %v", format)
 	}
 
 	return buf.Bytes(), nil
+}
+
+// evaluateFloat interprets the option value f. If f is between 0 and 1, it is
+// interpreted as a percentage of max, otherwise it is treated as an absolute
+// value.  If f is less than 0, 0 is returned.
+func evaluateFloat(f float64, max int) int {
+	if 0 < f && f < 1 {
+		return int(float64(max) * f)
+	}
+	if f < 0 {
+		return 0
+	}
+	return int(f)
 }
 
 // resizeParams determines if the image needs to be resized, and if so, the
@@ -85,20 +107,8 @@ func resizeParams(m image.Image, opt Options) (w, h int, resize bool) {
 	// convert percentage width and height values to absolute values
 	imgW := m.Bounds().Max.X - m.Bounds().Min.X
 	imgH := m.Bounds().Max.Y - m.Bounds().Min.Y
-	if 0 < opt.Width && opt.Width < 1 {
-		w = int(float64(imgW) * opt.Width)
-	} else if opt.Width < 0 {
-		w = 0
-	} else {
-		w = int(opt.Width)
-	}
-	if 0 < opt.Height && opt.Height < 1 {
-		h = int(float64(imgH) * opt.Height)
-	} else if opt.Height < 0 {
-		h = 0
-	} else {
-		h = int(opt.Height)
-	}
+	w = evaluateFloat(opt.Width, imgW)
+	h = evaluateFloat(opt.Height, imgH)
 
 	// never resize larger than the original image unless specifically allowed
 	if !opt.ScaleUp {
@@ -118,9 +128,60 @@ func resizeParams(m image.Image, opt Options) (w, h int, resize bool) {
 	return w, h, true
 }
 
+// cropParams calculates crop rectangle parameters to keep it in image bounds
+func cropParams(m image.Image, opt Options) (x0, y0, x1, y1 int, crop bool) {
+	if opt.CropX == 0 && opt.CropY == 0 && opt.CropWidth == 0 && opt.CropHeight == 0 {
+		return 0, 0, 0, 0, false
+	}
+
+	// width and height of image
+	imgW := m.Bounds().Max.X - m.Bounds().Min.X
+	imgH := m.Bounds().Max.Y - m.Bounds().Min.Y
+
+	// top left coordinate of crop
+	x0 = evaluateFloat(math.Abs(opt.CropX), imgW)
+	if opt.CropX < 0 {
+		x0 = imgW - x0
+	}
+	y0 = evaluateFloat(math.Abs(opt.CropY), imgH)
+	if opt.CropY < 0 {
+		y0 = imgH - y0
+	}
+
+	// width and height of crop
+	w := evaluateFloat(opt.CropWidth, imgW)
+	if w == 0 {
+		w = imgW
+	}
+	h := evaluateFloat(opt.CropHeight, imgH)
+	if h == 0 {
+		h = imgH
+	}
+
+	if x0 == 0 && y0 == 0 && w == imgW && h == imgH {
+		return 0, 0, 0, 0, false
+	}
+
+	// bottom right coordinate of crop
+	x1 = x0 + w
+	if x1 > imgW {
+		x1 = imgW
+	}
+	y1 = y0 + h
+	if y1 > imgH {
+		y1 = imgH
+	}
+
+	return x0, y0, x1, y1, true
+}
+
 // transformImage modifies the image m based on the transformations specified
 // in opt.
 func transformImage(m image.Image, opt Options) image.Image {
+	// crop if needed
+	if x0, y0, x1, y1, crop := cropParams(m, opt); crop {
+		m = imaging.Crop(m, image.Rect(x0, y0, x1, y1))
+	}
 	// resize if needed
 	if w, h, resize := resizeParams(m, opt); resize {
 		if opt.Fit {
