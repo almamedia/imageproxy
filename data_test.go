@@ -88,6 +88,7 @@ func TestParseOptions(t *testing.T) {
 		{"q70,1x2,fit,r90,fv,fh,sc0ffee,png", Options{Width: 1, Height: 2, Fit: true, Rotate: 90, FlipVertical: true, FlipHorizontal: true, Quality: 70, Signature: "c0ffee", Format: "png"}},
 		{"r90,fh,sc0ffee,png,q90,1x2,fv,fit", Options{Width: 1, Height: 2, Fit: true, Rotate: 90, FlipVertical: true, FlipHorizontal: true, Quality: 90, Signature: "c0ffee", Format: "png"}},
 		{"cx100,cw300,1x2,cy200,ch400,sc,scaleUp", Options{Width: 1, Height: 2, ScaleUp: true, CropX: 100, CropY: 200, CropWidth: 300, CropHeight: 400, SmartCrop: true}},
+		{"cx100,cw300,cy200,ch400,1x2,enforceWebp", Options{Width: 1, Height: 2, EnforceWebp: true, CropX: 100, CropY: 200, CropWidth: 300, CropHeight: 400}},
 	}
 
 	for _, tt := range tests {

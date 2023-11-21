@@ -26,6 +26,7 @@ const (
 	optSignaturePrefix = "s"
 	optSizeDelimiter   = "x"
 	optScaleUp         = "scaleUp"
+	optEnforceWebp     = "enforceWebp"
 	optCropX           = "cx"
 	optCropY           = "cy"
 	optCropWidth       = "cw"
@@ -70,6 +71,10 @@ type Options struct {
 	// will always be overwritten by the value of Proxy.ScaleUp.
 	ScaleUp bool
 
+	// If true, enforce webp format for jpeg images. This value
+	// will always be overwritten by the value of Proxy.EnforceWebp.
+	EnforceWebp bool
+
 	// Desired image format. Valid values are "jpeg", "png", "tiff".
 	Format string
 
@@ -105,6 +110,9 @@ func (o Options) String() string {
 	}
 	if o.ScaleUp {
 		opts = append(opts, optScaleUp)
+	}
+	if o.EnforceWebp {
+		opts = append(opts, optEnforceWebp)
 	}
 	if o.Format != "" {
 		opts = append(opts, o.Format)
@@ -248,6 +256,8 @@ func ParseOptions(str string) Options {
 			options.FlipHorizontal = true
 		case opt == optScaleUp: // this option is intentionally not documented above
 			options.ScaleUp = true
+		case opt == optEnforceWebp: // this option is intentionally not documented above
+			options.EnforceWebp = true
 		case opt == optFormatJPEG, opt == optFormatPNG, opt == optFormatTIFF, opt == optFormatWEBP:
 			options.Format = opt
 		case opt == optSmartCrop:

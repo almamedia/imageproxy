@@ -64,6 +64,11 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		format = "jpeg"
 	}
 
+	// encode jpeg as webp if requested
+	if opt.EnforceWebp && format == "jpeg" {
+		format = "webp"
+	}
+
 	if opt.Format != "" {
 		format = opt.Format
 	}

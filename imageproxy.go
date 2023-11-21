@@ -85,6 +85,9 @@ type Proxy struct {
 	// list means all content types are allowed.
 	ContentTypes []string
 
+	// If true, enforce webp format for jpeg images
+	EnforceWebp bool
+
 	// The User-Agent used by imageproxy when requesting origin image
 	UserAgent string
 
@@ -140,7 +143,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Path == "/metrics" {
-		var h = promhttp.Handler()
+		h := promhttp.Handler()
 		h.ServeHTTP(w, r)
 		return
 	}
@@ -173,6 +176,7 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 
 	// assign static settings from proxy to req.Options
 	req.Options.ScaleUp = p.ScaleUp
+	req.Options.EnforceWebp = p.EnforceWebp
 
 	actualReq, _ := http.NewRequest("GET", req.String(), nil)
 	if p.UserAgent != "" {
@@ -210,7 +214,6 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp, err := p.Client.Do(actualReq)
-
 	if err != nil {
 		msg := fmt.Sprintf("error fetching remote image: %v", err)
 		p.log(msg)
