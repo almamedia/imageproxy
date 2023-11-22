@@ -75,7 +75,7 @@ type Options struct {
 	// will always be overwritten by the value of Proxy.EnforceWebp.
 	EnforceWebp bool
 
-	// Desired image format. Valid values are "jpeg", "png", "tiff".
+	// Desired image format. Valid values are "jpeg", "png", "tiff", "webp".
 	Format string
 
 	// Crop rectangle params
@@ -216,7 +216,7 @@ func (o Options) transform() bool {
 //
 // # Format
 //
-// The "jpeg", "png", and "tiff"  options can be used to specify the desired
+// The "jpeg", "png", "tiff" and "webp"  options can be used to specify the desired
 // image format of the proxied image.
 //
 // # Signature
