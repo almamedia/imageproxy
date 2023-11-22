@@ -528,8 +528,8 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}); err != nil {
 		t.log("error copying headers: %v", err)
 	}
-	fmt.Fprintf(buf, "Content-Length: %d\n\n", len(img))
 	setContentTypeHeader(buf, opt, resp.Header.Get("Content-Type"))
+	fmt.Fprintf(buf, "Content-Length: %d\n\n", len(img))
 	buf.Write(img)
 
 	return http.ReadResponse(bufio.NewReader(buf), req)
@@ -549,26 +549,26 @@ func setContentTypeHeader(buf *bytes.Buffer, opt Options, responseContentType st
 
 	switch opt.Format {
 	case optFormatJPEG:
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/jpeg")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/jpeg")
 		return
 	case optFormatPNG:
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/png")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/png")
 		return
 	case optFormatTIFF:
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/tiff")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/tiff")
 		return
 	case optFormatWEBP:
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/webp")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/webp")
 		return
 	}
 
 	if opt.EnforceWebp && responseContentType == "image/jpeg" {
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/webp")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/webp")
 		return
 	}
 
 	if responseContentType == "image/tiff" {
-		fmt.Fprintf(buf, "Content-Type: %s\n\n", "image/jpeg")
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/jpeg")
 		return
 	}
 }
