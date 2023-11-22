@@ -524,7 +524,7 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if err := resp.Header.WriteSubset(buf, map[string]bool{
 		"Content-Length": true,
 		// exclude Content-Type header if the format may have changed during transformation
-		"Content-Type": opt.Format != "" || resp.Header.Get("Content-Type") == "image/webp" || resp.Header.Get("Content-Type") == "image/tiff",
+		"Content-Type": excludeContentTypeHeader(opt, resp.Header.Get("Content-Type")),
 	}); err != nil {
 		t.log("error copying headers: %v", err)
 	}
@@ -532,4 +532,10 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	buf.Write(img)
 
 	return http.ReadResponse(bufio.NewReader(buf), req)
+}
+
+func excludeContentTypeHeader(opt Options, responseContentType string) bool {
+	return opt.Format != "" ||
+		responseContentType == "image/tiff" ||
+		(opt.EnforceWebp && responseContentType == "image/jpeg")
 }
