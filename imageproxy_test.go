@@ -585,3 +585,139 @@ func TestContentTypeMatches(t *testing.T) {
 		}
 	}
 }
+
+func TestExcludeContentTypeHeader(t *testing.T) {
+	tests := []struct {
+		name                string
+		opt                 Options
+		responseContentType string
+		expectedResult      bool
+	}{
+		{
+			name: "JPEG format",
+			opt: Options{
+				Format: optFormatJPEG,
+			},
+			responseContentType: "image/jpeg",
+			expectedResult:      true,
+		},
+		{
+			name: "PNG format",
+			opt: Options{
+				Format: optFormatPNG,
+			},
+			responseContentType: "image/png",
+			expectedResult:      true,
+		},
+		{
+			name: "TIFF format",
+			opt: Options{
+				Format: optFormatTIFF,
+			},
+			responseContentType: "image/tiff",
+			expectedResult:      true,
+		},
+		{
+			name: "WEBP format",
+			opt: Options{
+				Format: optFormatWEBP,
+			},
+			responseContentType: "image/webp",
+			expectedResult:      true,
+		},
+		{
+			name: "Enforce Webp",
+			opt: Options{
+				EnforceWebp: true,
+			},
+			responseContentType: "image/jpeg",
+			expectedResult:      true,
+		},
+		{
+			name:                "TIFF response content type",
+			opt:                 Options{},
+			responseContentType: "image/tiff",
+			expectedResult:      true,
+		},
+		{
+			name:                "No format, no enforce Webp",
+			opt:                 Options{},
+			responseContentType: "image/jpeg",
+			expectedResult:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := excludeContentTypeHeader(tt.opt, tt.responseContentType); got != tt.expectedResult {
+				t.Errorf("excludeContentTypeHeader() = %v, want %v", got, tt.expectedResult)
+			}
+		})
+	}
+}
+
+func TestSetContentTypeHeader(t *testing.T) {
+	tests := []struct {
+		name                string
+		opt                 Options
+		responseContentType string
+		expectedContentType string
+	}{
+		{
+			name: "JPEG format",
+			opt: Options{
+				Format: optFormatJPEG,
+			},
+			responseContentType: "image/jpeg",
+			expectedContentType: "Content-Type: image/jpeg\n",
+		},
+		{
+			name: "PNG format",
+			opt: Options{
+				Format: optFormatPNG,
+			},
+			responseContentType: "image/png",
+			expectedContentType: "Content-Type: image/png\n",
+		},
+		{
+			name: "TIFF format",
+			opt: Options{
+				Format: optFormatTIFF,
+			},
+			responseContentType: "image/tiff",
+			expectedContentType: "Content-Type: image/tiff\n",
+		},
+		{
+			name: "WEBP format",
+			opt: Options{
+				Format: optFormatWEBP,
+			},
+			responseContentType: "image/webp",
+			expectedContentType: "Content-Type: image/webp\n",
+		},
+		{
+			name: "Enforce Webp",
+			opt: Options{
+				EnforceWebp: true,
+			},
+			responseContentType: "image/jpeg",
+			expectedContentType: "Content-Type: image/webp\n",
+		},
+		{
+			name:                "TIFF response content type",
+			opt:                 Options{},
+			responseContentType: "image/tiff",
+			expectedContentType: "Content-Type: image/jpeg\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			setContentTypeHeader(buf, tt.opt, tt.responseContentType)
+			if got := buf.String(); got != tt.expectedContentType {
+				t.Errorf("setContentTypeHeader() = %v, want %v", got, tt.expectedContentType)
+			}
+		})
+	}
+}
