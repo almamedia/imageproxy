@@ -14,7 +14,7 @@ import (
 	"log"
 	"math"
 
-	webpencode "git.sr.ht/~jackmordaunt/go-libwebp/webp"
+	"git.sr.ht/~jackmordaunt/go-libwebp/webp"
 	"github.com/disintegration/imaging"
 	"github.com/muesli/smartcrop"
 	"github.com/muesli/smartcrop/nfnt"
@@ -121,7 +121,7 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		quality := float32(q) / float32(100)
 
 		m = transformImage(m, opt)
-		err = webpencode.Encode(buf, m, webpencode.Quality(quality))
+		err = webp.Encode(buf, m, webp.Quality(quality))
 		if err != nil {
 			return nil, err
 		}
