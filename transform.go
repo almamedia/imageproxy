@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 
+	"git.sr.ht/~jackmordaunt/go-libwebp/webp"
 	"github.com/disintegration/imaging"
 	"github.com/muesli/smartcrop"
 	"github.com/muesli/smartcrop/nfnt"
@@ -58,9 +59,14 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 		}
 	}
 
-	// encode webp and tiff as jpeg by default
-	if format == "tiff" || format == "webp" {
+	// encode tiff as jpeg by default
+	if format == "tiff" {
 		format = "jpeg"
+	}
+
+	// encode jpeg as webp if requested
+	if opt.EnforceWebp && format == "jpeg" {
+		format = "webp"
 	}
 
 	if opt.Format != "" {
@@ -104,6 +110,18 @@ func Transform(img []byte, opt Options) ([]byte, error) {
 	case "tiff":
 		m = transformImage(m, opt)
 		err = tiff.Encode(buf, m, &tiff.Options{Compression: tiff.Deflate, Predictor: true})
+		if err != nil {
+			return nil, err
+		}
+	case "webp":
+		q := opt.Quality
+		if q == 0 {
+			q = defaultQuality
+		}
+		quality := float32(q) / float32(100)
+
+		m = transformImage(m, opt)
+		err = webp.Encode(buf, m, webp.Quality(quality))
 		if err != nil {
 			return nil, err
 		}

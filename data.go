@@ -20,11 +20,13 @@ const (
 	optFormatJPEG      = "jpeg"
 	optFormatPNG       = "png"
 	optFormatTIFF      = "tiff"
+	optFormatWEBP      = "webp"
 	optRotatePrefix    = "r"
 	optQualityPrefix   = "q"
 	optSignaturePrefix = "s"
 	optSizeDelimiter   = "x"
 	optScaleUp         = "scaleUp"
+	optEnforceWebp     = "enforceWebp"
 	optCropX           = "cx"
 	optCropY           = "cy"
 	optCropWidth       = "cw"
@@ -69,7 +71,11 @@ type Options struct {
 	// will always be overwritten by the value of Proxy.ScaleUp.
 	ScaleUp bool
 
-	// Desired image format. Valid values are "jpeg", "png", "tiff".
+	// If true, enforce webp format for jpeg images. This value
+	// will always be overwritten by the value of Proxy.EnforceWebp.
+	EnforceWebp bool
+
+	// Desired image format. Valid values are "jpeg", "png", "tiff", "webp".
 	Format string
 
 	// Crop rectangle params
@@ -104,6 +110,9 @@ func (o Options) String() string {
 	}
 	if o.ScaleUp {
 		opts = append(opts, optScaleUp)
+	}
+	if o.EnforceWebp {
+		opts = append(opts, optEnforceWebp)
 	}
 	if o.Format != "" {
 		opts = append(opts, o.Format)
@@ -207,7 +216,7 @@ func (o Options) transform() bool {
 //
 // # Format
 //
-// The "jpeg", "png", and "tiff"  options can be used to specify the desired
+// The "jpeg", "png", "tiff" and "webp"  options can be used to specify the desired
 // image format of the proxied image.
 //
 // # Signature
@@ -247,7 +256,9 @@ func ParseOptions(str string) Options {
 			options.FlipHorizontal = true
 		case opt == optScaleUp: // this option is intentionally not documented above
 			options.ScaleUp = true
-		case opt == optFormatJPEG, opt == optFormatPNG, opt == optFormatTIFF:
+		case opt == optEnforceWebp: // this option is intentionally not documented above
+			options.EnforceWebp = true
+		case opt == optFormatJPEG, opt == optFormatPNG, opt == optFormatTIFF, opt == optFormatWEBP:
 			options.Format = opt
 		case opt == optSmartCrop:
 			options.SmartCrop = true

@@ -85,6 +85,9 @@ type Proxy struct {
 	// list means all content types are allowed.
 	ContentTypes []string
 
+	// If true, enforce webp format for jpeg images
+	EnforceWebp bool
+
 	// The User-Agent used by imageproxy when requesting origin image
 	UserAgent string
 
@@ -140,7 +143,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Path == "/metrics" {
-		var h = promhttp.Handler()
+		h := promhttp.Handler()
 		h.ServeHTTP(w, r)
 		return
 	}
@@ -173,6 +176,7 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 
 	// assign static settings from proxy to req.Options
 	req.Options.ScaleUp = p.ScaleUp
+	req.Options.EnforceWebp = p.EnforceWebp
 
 	actualReq, _ := http.NewRequest("GET", req.String(), nil)
 	if p.UserAgent != "" {
@@ -210,7 +214,6 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp, err := p.Client.Do(actualReq)
-
 	if err != nil {
 		msg := fmt.Sprintf("error fetching remote image: %v", err)
 		p.log(msg)
@@ -521,12 +524,51 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if err := resp.Header.WriteSubset(buf, map[string]bool{
 		"Content-Length": true,
 		// exclude Content-Type header if the format may have changed during transformation
-		"Content-Type": opt.Format != "" || resp.Header.Get("Content-Type") == "image/webp" || resp.Header.Get("Content-Type") == "image/tiff",
+		"Content-Type": excludeContentTypeHeader(opt, resp.Header.Get("Content-Type")),
 	}); err != nil {
 		t.log("error copying headers: %v", err)
 	}
+	setContentTypeHeader(buf, opt, resp.Header.Get("Content-Type"))
 	fmt.Fprintf(buf, "Content-Length: %d\n\n", len(img))
 	buf.Write(img)
 
 	return http.ReadResponse(bufio.NewReader(buf), req)
+}
+
+func excludeContentTypeHeader(opt Options, responseContentType string) bool {
+	return opt.Format != "" ||
+		responseContentType == "image/tiff" ||
+		(opt.EnforceWebp && responseContentType == "image/jpeg")
+}
+
+// these should match with Transform
+func setContentTypeHeader(buf *bytes.Buffer, opt Options, responseContentType string) {
+	if !excludeContentTypeHeader(opt, responseContentType) {
+		return
+	}
+
+	switch opt.Format {
+	case optFormatJPEG:
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/jpeg")
+		return
+	case optFormatPNG:
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/png")
+		return
+	case optFormatTIFF:
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/tiff")
+		return
+	case optFormatWEBP:
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/webp")
+		return
+	}
+
+	if opt.EnforceWebp && responseContentType == "image/jpeg" {
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/webp")
+		return
+	}
+
+	if responseContentType == "image/tiff" {
+		fmt.Fprintf(buf, "Content-Type: %s\n", "image/jpeg")
+		return
+	}
 }
