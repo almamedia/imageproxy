@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"runtime"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	tphttp "willnorris.com/go/imageproxy/third_party/http"
+	tphc "willnorris.com/go/imageproxy/third_party/httpcache"
 )
 
 // Maximum number of redirection-followings allowed.
@@ -94,6 +96,21 @@ type Proxy struct {
 	// PassRequestHeaders identifies HTTP headers to pass from inbound
 	// requests to the proxied server.
 	PassRequestHeaders []string
+
+	// PassResponseHeaders identifies HTTP headers to pass from server responses to the proxy client.
+	// If nil, a default set of headers is passed: Cache-Control, Last-Modified, Expires, Etag, Link.
+	PassResponseHeaders []string
+
+	// MinimumCacheDuration is the minimum duration to cache remote images.
+	// This will override cache duration from the remote server.
+	MinimumCacheDuration time.Duration
+
+	// ForceCache, when true, forces caching of all images, even if the
+	// remote server specifies 'private' or 'no-store' in the cache-control
+	// header.
+	ForceCache bool
+
+	timeNow time.Time // current time, used for testing
 }
 
 // NewProxy constructs a new proxy.  The provided http RoundTripper will be
@@ -116,11 +133,13 @@ func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
 		Transport: &TransformingTransport{
 			Transport:     transport,
 			CachingClient: client,
-			log: func(format string, v ...interface{}) {
+			limiter:       make(chan struct{}, runtime.NumCPU()),
+			log: func(format string, v ...any) {
 				if proxy.Verbose {
 					proxy.logf(format, v...)
 				}
 			},
+			updateCacheHeaders: proxy.updateCacheHeaders,
 		},
 		Cache:               cache,
 		MarkCachedResponses: true,
@@ -129,6 +148,63 @@ func NewProxy(transport http.RoundTripper, cache Cache) *Proxy {
 	proxy.Client = client
 
 	return proxy
+}
+
+// updateCacheHeaders updates the cache-control headers in the provided headers.
+//
+// If the cache-control header includes the 'private' directive,
+// then 'no-store' is added to the header to prevent caching.
+// If p.ForceCache is set, then 'private' and 'no-store' are both ignored and removed.
+//
+// This method also sets the cache-control max-age value to the maximum of the minimum cache
+// duration, the expires header, and the max-age header. It also removes the
+// expires header.
+func (p *Proxy) updateCacheHeaders(hdr http.Header) {
+	cc := tphc.ParseCacheControl(hdr)
+
+	// respect 'private' and 'no-store' directives unless ForceCache is set.
+	// The httpcache package ignores the 'private' directive,
+	// since it's not intended to be used as a shared cache.
+	// imageproxy IS a shared cache, so we enforce the 'private' directive ourself
+	// by setting 'no-store', which httpcache does respect.
+	if p.ForceCache {
+		delete(cc, "private")
+		delete(cc, "no-store")
+		hdr.Set("Cache-Control", cc.String())
+	} else {
+		if _, ok := cc["private"]; ok {
+			cc["no-store"] = ""
+			hdr.Set("Cache-Control", cc.String())
+			return
+		}
+		if _, ok := cc["no-store"]; ok {
+			return
+		}
+	}
+
+	if p.MinimumCacheDuration == 0 {
+		return
+	}
+
+	var expiresDuration time.Duration
+	var maxAgeDuration time.Duration
+
+	if maxAge, ok := cc["max-age"]; ok {
+		maxAgeDuration, _ = time.ParseDuration(maxAge + "s")
+	}
+	if date, err := httpcache.Date(hdr); err == nil {
+		if expiresHeader := hdr.Get("Expires"); expiresHeader != "" {
+			if expires, err := time.Parse(time.RFC1123, expiresHeader); err == nil {
+				expiresDuration = expires.Sub(date)
+			}
+		}
+	}
+
+	maxAge := max(p.MinimumCacheDuration, expiresDuration, maxAgeDuration)
+	cc["max-age"] = fmt.Sprintf("%d", int(maxAge.Seconds()))
+
+	hdr.Set("Cache-Control", cc.String())
+	hdr.Del("Expires")
 }
 
 // ServeHTTP handles incoming requests.
@@ -154,7 +230,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timer := prometheus.NewTimer(metricRequestDuration)
-	defer timer.ObserveDuration()
+	metricRequestsInFlight.Inc()
+	defer func() {
+		timer.ObserveDuration()
+		metricRequestsInFlight.Dec()
+	}()
+
 	h.ServeHTTP(w, r)
 }
 
@@ -239,7 +320,12 @@ func (p *Proxy) serveImage(w http.ResponseWriter, r *http.Request) {
 		metricServedFromCache.Inc()
 	}
 
-	copyHeader(w.Header(), resp.Header, "Cache-Control", "Last-Modified", "Expires", "Etag", "Link")
+	if p.PassResponseHeaders == nil {
+		// pass default set of response headers
+		copyHeader(w.Header(), resp.Header, "Cache-Control", "Last-Modified", "Expires", "Etag", "Link")
+	} else {
+		copyHeader(w.Header(), resp.Header, p.PassResponseHeaders...)
+	}
 
 	if should304(r, resp) {
 		w.WriteHeader(http.StatusNotModified)
@@ -306,15 +392,29 @@ var (
 	errDeniedHost       = errors.New("request contains a denied host")
 	errNotAllowed       = errors.New("request does not contain an allowed host or valid signature")
 	errTooManyRedirects = errors.New("too many redirects")
+	errNotValid         = errors.New("request is no longer valid")
 
 	msgNotAllowed           = "requested URL is not allowed"
 	msgNotAllowedInRedirect = "requested URL in redirect is not allowed"
 )
 
+func (p *Proxy) now() time.Time {
+	if !p.timeNow.IsZero() {
+		return p.timeNow
+	}
+	return time.Now()
+}
+
 // allowed determines whether the specified request contains an allowed
 // referrer, host, and signature.  It returns an error if the request is not
-// allowed.
+// allowed or not valid any longer.
 func (p *Proxy) allowed(r *Request) error {
+	if !r.Options.ValidUntil.IsZero() {
+		if !p.now().Before(r.Options.ValidUntil) {
+			return errNotValid
+		}
+	}
+
 	if len(p.Referrers) > 0 && !referrerMatches(p.Referrers, r.Original) {
 		return errReferrer
 	}
@@ -448,7 +548,7 @@ func should304(req *http.Request, resp *http.Response) bool {
 	return false
 }
 
-func (p *Proxy) log(v ...interface{}) {
+func (p *Proxy) log(v ...any) {
 	if p.Logger != nil {
 		p.Logger.Print(v...)
 	} else {
@@ -456,7 +556,7 @@ func (p *Proxy) log(v ...interface{}) {
 	}
 }
 
-func (p *Proxy) logf(format string, v ...interface{}) {
+func (p *Proxy) logf(format string, v ...any) {
 	if p.Logger != nil {
 		p.Logger.Printf(format, v...)
 	} else {
@@ -477,7 +577,12 @@ type TransformingTransport struct {
 	// responses are properly cached.
 	CachingClient *http.Client
 
-	log func(format string, v ...interface{})
+	// limiter limits the number of concurrent transformations being processed.
+	limiter chan struct{}
+
+	log func(format string, v ...any)
+
+	updateCacheHeaders func(hdr http.Header)
 }
 
 // RoundTrip implements the http.RoundTripper interface.
@@ -487,7 +592,11 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 		if t.log != nil {
 			t.log("fetching remote URL: %v", req.URL)
 		}
-		return t.Transport.RoundTrip(req)
+		resp, err := t.Transport.RoundTrip(req)
+		if err == nil && t.updateCacheHeaders != nil {
+			t.updateCacheHeaders(resp.Header)
+		}
+		return resp, err
 	}
 
 	f := req.URL.Fragment
@@ -502,7 +611,23 @@ func (t *TransformingTransport) RoundTrip(req *http.Request) (*http.Response, er
 
 	if should304(req, resp) {
 		// bare 304 response, full response will be used from cache
-		return &http.Response{StatusCode: http.StatusNotModified}, nil
+		return &http.Response{
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Status:     fmt.Sprintf("%d %s", http.StatusNotModified, http.StatusText(http.StatusNotModified)),
+			StatusCode: http.StatusNotModified,
+			Body:       http.NoBody,
+		}, nil
+	}
+
+	// enforce limiter after we've checked if we can early return a 304 response,
+	// but before we read the response body and perform transformations.
+	if t.limiter != nil {
+		t.limiter <- struct{}{}
+		defer func() {
+			<-t.limiter
+		}()
 	}
 
 	b, err := io.ReadAll(resp.Body)
